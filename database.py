@@ -62,24 +62,30 @@ def get_plant_info(plant_id):
 def add_user_action(user_id, plant_id, action_type):
     plant = get_plant_info(plant_id)
     if not plant:
+        print("Ошибка: растение не найдено.")
         return None
 
     conn = get_db_connection()
     cursor = conn.cursor()
-    action_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    action_date = datetime.now()
 
-    next_action_date = action_date
-    if action_type == 'полить' and plant["watering_interval"] > 0:
-        next_action_date = (datetime.now() + timedelta(days=plant["watering_interval"])).strftime('%Y-%m-%d %H:%M:%S')
-    elif action_type == 'опрыскать' and plant["spraying_interval"] > 0:
-        next_action_date = (datetime.now() + timedelta(days=plant["spraying_interval"])).strftime('%Y-%m-%d %H:%M:%S')
-    elif action_type == 'удобрить' and plant["fertilizing_interval"] > 0:
-        next_action_date = (datetime.now() + timedelta(days=plant["fertilizing_interval"])).strftime('%Y-%m-%d %H:%M:%S')
+    interval = 0
+    if action_type == 'полить':
+        interval = plant["watering_interval"]
+    elif action_type == 'опрыскать':
+        interval = plant["spraying_interval"]
+    elif action_type == 'удобрить':
+        interval = plant["fertilizing_interval"]
+
+    next_action_date = action_date + timedelta(days=interval) if interval > 0 else action_date
+
+    print(f"Запись действия: user_id={user_id}, plant_id={plant_id}, action_type={action_type}, action_date={action_date}, next_action_date={next_action_date}")
 
     cursor.execute('''
     INSERT INTO user_actions (user_id, plant_id, action_type, action_date, next_action_date)
     VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, plant_id, action_type, action_date, next_action_date))
+    ''', (user_id, plant_id, action_type, action_date.strftime('%Y-%m-%d %H:%M:%S'), next_action_date.strftime('%Y-%m-%d %H:%M:%S')))
+
     conn.commit()
     conn.close()
 
