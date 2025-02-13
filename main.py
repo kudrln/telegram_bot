@@ -1,120 +1,112 @@
 ﻿from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-import sqlite3
-from datetime import datetime, timedelta
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
+from database import get_plants, get_plant_info, add_user_action, get_user_actions
+from datetime import datetime
+import logging
 
-# Функция для получения информации о растении
-def get_plant_info(plant_id):
-    conn = sqlite3.connect('plants.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM plants WHERE id = ?', (plant_id,))
-    plant = cursor.fetchone()
-    conn.close()
-    return plant
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Функция для добавления действия пользователя
-def add_user_action(user_id, plant_id, action_type):
-    conn = sqlite3.connect('plants.db')
-    cursor = conn.cursor()
-    action_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    plant = get_plant_info(plant_id)
-    if action_type == 'watering':
-        next_action_date = (datetime.now() + timedelta(days=plant[4])).strftime('%Y-%m-%d %H:%M:%S')
-    elif action_type == 'spraying':
-        next_action_date = (datetime.now() + timedelta(days=plant[5])).strftime('%Y-%m-%d %H:%M:%S')
-    elif action_type == 'fertilizing':
-        next_action_date = (datetime.now() + timedelta(days=plant[6])).strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute('INSERT INTO user_actions (user_id, plant_id, action_type, action_date, next_action_date) VALUES (?, ?, ?, ?, ?)',
-                   (user_id, plant_id, action_type, action_date, next_action_date))
-    conn.commit()
-    conn.close()
-
-# Функция для получения списка растений
-def get_plants():
-    conn = sqlite3.connect('plants.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT id, name FROM plants')
-    plants = cursor.fetchall()
-    conn.close()
-    return plants
-
-# Обработчик команды /start
-def start(update: Update, context: CallbackContext):
+async def start(update: Update, context: CallbackContext):
     user_name = update.message.from_user.first_name
-    update.message.reply_text(f"привет, {user_name}🖐!", reply_markup=ReplyKeyboardMarkup([
-        ['уход за растением 🍃'],
-        ['информация о растении 📌'],
-        ['календарь 📅']
-    ], resize_keyboard=True))
+    context.user_data.clear()
+    await update.message.reply_text(
+        f"привет, {user_name} 🖐!",
+        reply_markup=ReplyKeyboardMarkup([
+            ['уход за растением 🍃'],
+            ['информация о растении 📌'],
+            ['календарь 📅']
+        ], resize_keyboard=True)
+    )
 
-# Обработчик кнопки "Уход за растением"
-def plant_care(update: Update, context: CallbackContext):
+async def plant_care(update: Update, context: CallbackContext):
     plants = get_plants()
-    buttons = [[plant[1]] for plant in plants]
-    update.message.reply_text("выбери растение:", reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True))
+    buttons = [[plant["name"]] for plant in plants]
+    buttons.append(["в начало ↩"])
+    context.user_data['mode'] = 'care'
+    await update.message.reply_text("выбери растение для ухода:", reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True))
 
-# Обработчик выбора растения для ухода
-def choose_plant_care(update: Update, context: CallbackContext):
-    plant_name = update.message.text
+async def plant_info(update: Update, context: CallbackContext):
     plants = get_plants()
-    plant_id = next((plant[0] for plant in plants if plant[1] == plant_name), None)
-    if plant_id:
-        update.message.reply_text("выбери действие:", reply_markup=ReplyKeyboardMarkup([
-            ['полив 🚿', 'опрыскивание 💦', 'удобрение 💩']
-        ], resize_keyboard=True))
-        context.user_data['plant_id'] = plant_id
+    buttons = [[plant["name"]] for plant in plants]
+    buttons.append(["в начало ↩"])
+    context.user_data['mode'] = 'info'
+    await update.message.reply_text("выбери растение для просмотра информации:", reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True))
 
-# Обработчик выбора действия для ухода
-def choose_care_action(update: Update, context: CallbackContext):
+async def handle_text(update: Update, context: CallbackContext):
+    text = update.message.text.strip().lower()
+
+    # Проверка кнопки "в начало ↩"
+    if text == "в начало ↩":
+        await start(update, context)
+        return
+
+    mode = context.user_data.get('mode')
+    plants = get_plants()
+    plant = next((p for p in plants if text in p["name"].lower()), None)
+
+    if not plant:
+        await update.message.reply_text("🌱 Растение не найдено. Попробуй ещё раз.")
+        return
+
+    if mode == 'care':
+        context.user_data['plant_id'] = plant["id"]
+        await update.message.reply_text(
+            "выбери действие:",
+            reply_markup=ReplyKeyboardMarkup([
+                ['полить 🚿', 'опрыскать 💦', 'удобрить 💩'],
+                ['в начало ↩']
+            ], resize_keyboard=True)
+        )
+    elif mode == 'info':
+        plant_details = get_plant_info(plant["id"])
+        if plant_details:
+            await update.message.reply_photo(plant_details["photo"], caption=plant_details["info"])
+        else:
+            await update.message.reply_text("❗ Информация о растении не найдена.")
+
+async def choose_care_action(update: Update, context: CallbackContext):
+    if context.user_data.get('mode') != 'care':
+        return
     action_type = update.message.text.lower()
     plant_id = context.user_data.get('plant_id')
     if plant_id:
         add_user_action(update.message.from_user.id, plant_id, action_type)
-        update.message.reply_text(f"действие '{action_type}' записано в календарь (˶˃ ᵕ ˂˶)")
+        await update.message.reply_text(f"действие '{action_type}' записано в календарь. 🌿")
+    else:
+        await update.message.reply_text("ошибочка: растение не выбрано.")
 
-# Обработчик кнопки "Информация о растении"
-def plant_info(update: Update, context: CallbackContext):
-    plants = get_plants()
-    buttons = [[plant[1]] for plant in plants]
-    update.message.reply_text("выбери растение:", reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True))
-
-# Обработчик выбора растения для информации
-def choose_plant_info(update: Update, context: CallbackContext):
-    plant_name = update.message.text
-    plants = get_plants()
-    plant = next((plant for plant in plants if plant[1] == plant_name), None)
-    if plant:
-        update.message.reply_photo(plant[2], caption=plant[3])
-
-# Обработчик кнопки "Календарь"
-def calendar(update: Update, context: CallbackContext):
+async def calendar(update: Update, context: CallbackContext):
     user_id = update.message.from_user.id
-    conn = sqlite3.connect('plants.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM user_actions WHERE user_id = ?', (user_id,))
-    actions = cursor.fetchall()
-    conn.close()
+    actions = get_user_actions(user_id)
     if actions:
         for action in actions:
-            update.message.reply_text(f"растение: {get_plant_info(action[2])[1]}, Действие: {action[3]}, Дата: {action[4]}, Следующее действие: {action[5]}")
+            plant = get_plant_info(action["plant_id"])
+            if plant:
+                try:
+                    action_date = datetime.strptime(action["action_date"], '%Y-%m-%d %H:%M:%S')
+                    next_action_date = datetime.strptime(action["next_action_date"], '%Y-%m-%d %H:%M:%S')
+                    await update.message.reply_text(
+                        f"🌱 Растение: {plant['name']}\n"
+                        f"📅 Действие: {action['action_type']}\n"
+                        f"🕒 Дата последнего действия: {action_date.strftime('%d-%m-%Y')}\n"
+                        f"📆 Следующее действие: {next_action_date.strftime('%d-%m-%Y')}"
+                    )
+                except ValueError as e:
+                    logger.error(f"Ошибка преобразования даты: {e}")
+                    await update.message.reply_text("Ошибка отображения даты. Попробуй позже.")
     else:
-        update.message.reply_text("у тебя пока нет записей в календаре.")
+        await update.message.reply_text("у тебя пока нет записей в календаре.")
 
-# Основная функция
 def main():
-    updater = Updater("YOUR_BOT_TOKEN", use_context=True)
-    dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.text("уход за растением 🍃"), plant_care))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, choose_plant_care))
-    dp.add_handler(MessageHandler(Filters.text("полив 🚿") | Filters.text("опрыскивание 💦") | Filters.text("удобрение 💩"), choose_care_action))
-    dp.add_handler(MessageHandler(Filters.text("информация о растении 📌"), plant_info))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, choose_plant_info))
-    dp.add_handler(MessageHandler(Filters.text("календарь 📅"), calendar))
-
-    updater.start_polling()
-    updater.idle()
+    application = Application.builder().token("7798509904:AAEbX-QgCVhjSK2Hp4KGM5sG3KAAI1J2zT0").build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.Text("уход за растением 🍃"), plant_care))
+    application.add_handler(MessageHandler(filters.Text("информация о растении 📌"), plant_info))
+    application.add_handler(MessageHandler(filters.Text("календарь 📅"), calendar))
+    application.add_handler(MessageHandler(filters.Text(["полить 🚿", "опрыскать 💦", "удобрить 💩"]), choose_care_action))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
